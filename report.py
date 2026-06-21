@@ -134,6 +134,32 @@ class Looker:
             print(f"  ⚠  Monthly trend query failed: {e}")
             return []
 
+    def audience(self, start, end):
+        rows = self.query(
+            fields=["customers.customer_group", "orders.cz_actual", "orders.num_orders"],
+            filters={**RETAIL_FILTERS, "orders.created_date": self._date_filter(start, end)},
+        )
+        result = {"B2C": {"revenue": 0.0, "orders": 0}, "Trade": {"revenue": 0.0, "orders": 0}}
+        for row in rows:
+            grp = row.get("customers.customer_group") or "B2C"
+            if grp in result:
+                result[grp]["revenue"] += float(row.get("orders.cz_actual", 0) or 0)
+                result[grp]["orders"]  += int(row.get("orders.num_orders", 0) or 0)
+        return result
+
+    def audience_stores(self, start, end):
+        rows = self.query(
+            fields=["orders.store_name", "customers.customer_group", "orders.cz_actual"],
+            filters={**RETAIL_FILTERS, "orders.created_date": self._date_filter(start, end)},
+        )
+        result = {k: {"B2C": 0.0, "Trade": 0.0} for k in STORE_MAP.values()}
+        for row in rows:
+            sk  = STORE_MAP.get(row.get("orders.store_name", ""))
+            grp = row.get("customers.customer_group") or "B2C"
+            if sk and grp in ("B2C", "Trade"):
+                result[sk][grp] += float(row.get("orders.cz_actual", 0) or 0)
+        return result
+
     def categories(self, start, end):
         try:
             rows = self.query(
@@ -282,7 +308,8 @@ def make_html(d, ty_yd, ty_lw, ty_mtd, ly_yd, ly_lw, ly_mtd,
               stores_yd, stores_lw, stores_mtd,
               stores_ly_yd, stores_ly_lw, stores_ly_mtd,
               plan, daily_actuals, categories, monthly_trend,
-              ly_categories=None):
+              ly_categories=None,
+              aud_yd=None, aud_lw=None, aud_mtd=None, aud_mtd_stores=None):
 
     def sp(s, e, k="total"):
         return sum(plan.get(day, {}).get(k, 0) for day in range(s, e + 1))
@@ -386,7 +413,7 @@ def make_html(d, ty_yd, ty_lw, ty_mtd, ly_yd, ly_lw, ly_mtd,
         + '</div>'
     )
 
-    def kpi_card(period_label, r, ly_r, plan_total, plan_label):
+    def kpi_card(period_label, r, ly_r, plan_total, plan_label, aud=None):
         rev_vly = pct(r["revenue"], ly_r["revenue"])
         ord_vly = pct(r["orders"],  ly_r["orders"])
         aov_vly = pct(aov_fn(r),    aov_fn(ly_r))
@@ -400,6 +427,21 @@ def make_html(d, ty_yd, ty_lw, ty_mtd, ly_yd, ly_lw, ly_mtd,
         <div class="kpi-right">
           <div class="kpi-val">{upt_fn(r)}</div>
           <div class="kpi-delta"><span class="{css_cls(upt_vly)}">{sign(upt_vly)} vs LY</span></div>
+        </div>
+      </div>"""
+        aud_row = ""
+        if aud:
+            trade_rev = aud.get("Trade", {}).get("revenue", 0)
+            b2c_rev   = aud.get("B2C",   {}).get("revenue", 0)
+            total_aud = trade_rev + b2c_rev or 1
+            trade_pct = round(trade_rev / total_aud * 100)
+            b2c_pct   = 100 - trade_pct
+            aud_row = f"""
+      <div class="kpi">
+        <span class="kpi-name">Audience</span>
+        <div class="kpi-right" style="font-size:11px;line-height:1.6;">
+          <div>Trade &nbsp;<strong>{fmtd(trade_rev)}</strong> <span style="color:#8A8278;">({trade_pct}%)</span></div>
+          <div>B2C &nbsp;<strong>{fmtd(b2c_rev)}</strong> <span style="color:#8A8278;">({b2c_pct}%)</span></div>
         </div>
       </div>"""
         return f"""
@@ -425,7 +467,7 @@ def make_html(d, ty_yd, ty_lw, ty_mtd, ly_yd, ly_lw, ly_mtd,
           <div class="kpi-val">{"n/a" if not r["orders"] else fmtd(aov_fn(r))}</div>
           <div class="kpi-delta"><span class="{css_cls(aov_vly)}">{sign(aov_vly)} vs LY</span></div>
         </div>
-      </div>{upt_row}
+      </div>{upt_row}{aud_row}
       <div class="plan-section">
         <div class="plan-header">
           <span>vs Plan ({plan_label})</span>
@@ -483,6 +525,37 @@ def make_html(d, ty_yd, ty_lw, ty_mtd, ly_yd, ly_lw, ly_mtd,
       {store_tbl_row("soho",   "SoHo",   "flagship")}
       {store_tbl_row("denver", "Denver")}
       {store_tbl_row("dallas", "Dallas")}
+    </tbody>
+  </table>"""
+
+    # Audience by store MTD table
+    aud_store_table = ""
+    if aud_mtd_stores and aud_mtd:
+        def aud_store_row(key, label):
+            trade = aud_mtd_stores.get(key, {}).get("Trade", 0)
+            b2c   = aud_mtd_stores.get(key, {}).get("B2C",   0)
+            tot   = trade + b2c or 1
+            return (f'<tr><td><span class="store-name">{label}</span></td>'
+                    f'<td>{fmtd(trade)}</td><td style="color:#8A8278;">{round(trade/tot*100)}%</td>'
+                    f'<td>{fmtd(b2c)}</td><td style="color:#8A8278;">{round(b2c/tot*100)}%</td></tr>')
+        tot_trade = aud_mtd.get("Trade", {}).get("revenue", 0)
+        tot_b2c   = aud_mtd.get("B2C",   {}).get("revenue", 0)
+        tot_all   = tot_trade + tot_b2c or 1
+        aud_store_table = f"""
+  <div class="section-label">Audience Mix &mdash; MTD {d['mtd_start'].strftime('%b %-d')}–{d['yd'].strftime('%-d')}</div>
+  <table class="tbl">
+    <thead>
+      <tr><th>Store</th><th>Trade Rev</th><th>Trade %</th><th>B2C Rev</th><th>B2C %</th></tr>
+    </thead>
+    <tbody>
+      {aud_store_row('soho',   'SoHo')}
+      {aud_store_row('denver', 'Denver')}
+      {aud_store_row('dallas', 'Dallas')}
+      <tr class="total-row">
+        <td>Total</td>
+        <td>{fmtd(tot_trade)}</td><td style="color:#8A8278;">{round(tot_trade/tot_all*100)}%</td>
+        <td>{fmtd(tot_b2c)}</td><td style="color:#8A8278;">{round(tot_b2c/tot_all*100)}%</td>
+      </tr>
     </tbody>
   </table>"""
 
@@ -601,13 +674,15 @@ def make_html(d, ty_yd, ty_lw, ty_mtd, ly_yd, ly_lw, ly_mtd,
 
   <div class="section-label">Performance Overview</div>
   <div class="period-grid">
-    {kpi_card(f"Yesterday &mdash; {yd_label}", ty_yd, ly_yd, yd_plan, d['yd'].strftime('%b %-d'))}
-    {kpi_card(f"Last Week &mdash; {d['lw_start'].strftime('%b %-d')}–{d['lw_end'].strftime('%-d')}", ty_lw, ly_lw, lw_plan, lw_label)}
-    {kpi_card(f"MTD &mdash; {mtd_label}", ty_mtd, ly_mtd, mtd_plan, mtd_label)}
+    {kpi_card(f"Yesterday &mdash; {yd_label}", ty_yd, ly_yd, yd_plan, d['yd'].strftime('%b %-d'), aud_yd)}
+    {kpi_card(f"Last Week &mdash; {d['lw_start'].strftime('%b %-d')}–{d['lw_end'].strftime('%-d')}", ty_lw, ly_lw, lw_plan, lw_label, aud_lw)}
+    {kpi_card(f"MTD &mdash; {mtd_label}", ty_mtd, ly_mtd, mtd_plan, mtd_label, aud_mtd)}
   </div>
 
   <div class="section-label">Store Performance</div>
   {store_table}
+
+  {aud_store_table}
 
   <div class="section-label">MTD Daily Revenue vs Plan &mdash; {d['mtd_start'].strftime('%b %Y')}</div>
   <div class="chart-wrap">
@@ -734,6 +809,12 @@ def main():
     trend_start = (d["yd"].replace(day=1) - datetime.timedelta(days=30 * 30)).replace(day=1)
     monthly_trend = lk.monthly_trend(trend_start, d["yd"])
 
+    print("Querying audience (Trade vs B2C)...")
+    aud_yd          = lk.audience(d["yd"],          d["yd"])
+    aud_lw          = lk.audience(d["lw_start"],    d["lw_end"])
+    aud_mtd         = lk.audience(d["mtd_start"],   d["yd"])
+    aud_mtd_stores  = lk.audience_stores(d["mtd_start"], d["yd"])
+
     # ── Metrics ───────────────────────────────────────────────────────────────
 
     def sp(s, e, k="total"):
@@ -768,6 +849,7 @@ def main():
         d, ty_yd, ty_lw, ty_mtd, ly_yd, ly_lw, ly_mtd,
         stores_yd, stores_lw, stores_mtd, stores_ly_yd, stores_ly_lw, stores_ly_mtd,
         plan, daily_actuals, categories, monthly_trend, ly_categories,
+        aud_yd=aud_yd, aud_lw=aud_lw, aud_mtd=aud_mtd, aud_mtd_stores=aud_mtd_stores,
     )
     report_url = push_report_page(html, d)
 
@@ -782,7 +864,8 @@ def main():
         f"Revenue: *{fmtd(ty_mtd['revenue'])}*  {sign(mtd_rev_vly)} vs LY  |  {fmt_pct(mtd_vp)} vs plan\n"
         f"Orders: *{ty_mtd['orders']}*  {sign(mtd_ord_vly)} vs LY  |  "
         f"AOV: *{fmtd(aov_fn(ty_mtd))}*  {sign(mtd_aov_vly)} vs LY  |  "
-        f"UPT: *{upt_fn(ty_mtd)}*  {sign(mtd_upt_vly)} vs LY\n\n"
+        f"UPT: *{upt_fn(ty_mtd)}*  {sign(mtd_upt_vly)} vs LY\n"
+        f"Trade: {fmtd(aud_mtd.get('Trade',{}).get('revenue',0))}  |  B2C: {fmtd(aud_mtd.get('B2C',{}).get('revenue',0))}\n\n"
         f"*Store Breakdown (MTD)*\n"
         f"• SoHo:   {fmtd(stores_mtd['soho'])}  ({fmt_pct(soho_vp)} vs plan)\n"
         f"• Denver: {fmtd(stores_mtd['denver'])}  ({fmt_pct(denver_vp)} vs plan)\n"
@@ -791,9 +874,11 @@ def main():
         f"Revenue: {fmtd(ty_lw['revenue'])}  {sign(lw_rev_vly)} vs LY  |  {fmt_pct(lw_vp)} vs plan\n"
         f"Orders: {ty_lw['orders']}  {sign(lw_ord_vly)} vs LY  |  "
         f"AOV: {fmtd(aov_fn(ty_lw))}  {sign(lw_aov_vly)} vs LY  |  "
-        f"UPT: {upt_fn(ty_lw)}  {sign(lw_upt_vly)} vs LY\n\n"
+        f"UPT: {upt_fn(ty_lw)}  {sign(lw_upt_vly)} vs LY\n"
+        f"Trade: {fmtd(aud_lw.get('Trade',{}).get('revenue',0))}  |  B2C: {fmtd(aud_lw.get('B2C',{}).get('revenue',0))}\n\n"
         f"*Yesterday ({d['yd'].strftime('%a %b %-d')})*\n"
-        f"{fmtd(ty_yd['revenue'])}  {sign(yd_rev_vly)} vs LY  |  {fmt_pct(yd_vp)} vs plan  |  {ty_yd['orders']} orders"
+        f"{fmtd(ty_yd['revenue'])}  {sign(yd_rev_vly)} vs LY  |  {fmt_pct(yd_vp)} vs plan  |  {ty_yd['orders']} orders\n"
+        f"Trade: {fmtd(aud_yd.get('Trade',{}).get('revenue',0))}  |  B2C: {fmtd(aud_yd.get('B2C',{}).get('revenue',0))}"
     )
 
     print("Posting to Slack...")
