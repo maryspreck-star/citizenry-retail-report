@@ -224,25 +224,29 @@ def main():
     # ── Narrative ─────────────────────────────────────────────────────────────
 
     print("Generating narrative...")
-    ctx = (
-        f"Citizenry Retail — {d['week_label']}\n\n"
-        f"MTD Revenue: {fmtd(ty_mtd['revenue'])} | {sign(mtd_rev_vly)} vs LY | {fmt_pct(mtd_vp)} vs plan\n"
-        f"MTD Orders: {ty_mtd['orders']} ({sign(mtd_ord_vly)} vs LY) | "
-        f"AOV: {fmtd(aov(ty_mtd))} ({sign(mtd_aov_vly)} vs LY) | "
-        f"UPT: {upt(ty_mtd)} ({sign(mtd_upt_vly)} vs LY)\n"
-        f"Last Week: {fmtd(ty_lw['revenue'])} | {sign(lw_rev_vly)} vs LY | {fmt_pct(lw_vp)} vs plan\n"
-        f"Yesterday: {fmtd(ty_yd['revenue'])} | {sign(yd_rev_vly)} vs LY | {fmt_pct(yd_vp)} vs plan\n\n"
-        f"Store MTD: SoHo {fmtd(stores['soho'])} ({fmt_pct(soho_vp)} vs plan) | "
-        f"Denver {fmtd(stores['denver'])} ({fmt_pct(denver_vp)} vs plan) | "
-        f"Dallas {fmtd(stores['dallas'])} ({fmt_pct(dallas_vp)} vs plan)"
-    )
-    narrative = Anthropic(api_key=ANTHROPIC_KEY).messages.create(
-        model="claude-sonnet-4-6", max_tokens=350,
-        messages=[{"role": "user", "content":
-            "Write a 2-paragraph retail performance summary for the Citizenry exec team. "
-            "Direct and factual, 3–4 sentences each. P1: overall MTD vs plan and LY, key driver. "
-            "P2: store highlights. Plain text only.\n\n" + ctx}],
-    ).content[0].text.strip()
+    narrative = ""
+    try:
+        ctx = (
+            f"Citizenry Retail — {d['week_label']}\n\n"
+            f"MTD Revenue: {fmtd(ty_mtd['revenue'])} | {sign(mtd_rev_vly)} vs LY | {fmt_pct(mtd_vp)} vs plan\n"
+            f"MTD Orders: {ty_mtd['orders']} ({sign(mtd_ord_vly)} vs LY) | "
+            f"AOV: {fmtd(aov(ty_mtd))} ({sign(mtd_aov_vly)} vs LY) | "
+            f"UPT: {upt(ty_mtd)} ({sign(mtd_upt_vly)} vs LY)\n"
+            f"Last Week: {fmtd(ty_lw['revenue'])} | {sign(lw_rev_vly)} vs LY | {fmt_pct(lw_vp)} vs plan\n"
+            f"Yesterday: {fmtd(ty_yd['revenue'])} | {sign(yd_rev_vly)} vs LY | {fmt_pct(yd_vp)} vs plan\n\n"
+            f"Store MTD: SoHo {fmtd(stores['soho'])} ({fmt_pct(soho_vp)} vs plan) | "
+            f"Denver {fmtd(stores['denver'])} ({fmt_pct(denver_vp)} vs plan) | "
+            f"Dallas {fmtd(stores['dallas'])} ({fmt_pct(dallas_vp)} vs plan)"
+        )
+        narrative = Anthropic(api_key=ANTHROPIC_KEY).messages.create(
+            model="claude-sonnet-4-6", max_tokens=350,
+            messages=[{"role": "user", "content":
+                "Write a 2-paragraph retail performance summary for the Citizenry exec team. "
+                "Direct and factual, 3–4 sentences each. P1: overall MTD vs plan and LY, key driver. "
+                "P2: store highlights. Plain text only.\n\n" + ctx}],
+        ).content[0].text.strip()
+    except Exception as e:
+        print(f"  ⚠  Narrative skipped: {e}")
 
     # ── Slack ─────────────────────────────────────────────────────────────────
 
@@ -271,7 +275,7 @@ def main():
         f"*Yesterday ({d['yd'].strftime('%a %b %-d')})*\n"
         f"{fmtd(ty_yd['revenue'])}  {sign(yd_rev_vly)} vs LY  |  {fmt_pct(yd_vp)} vs plan  |  {ty_yd['orders']} orders\n\n"
 
-        f"_{narrative}_"
+        + (f"\n_{narrative}_" if narrative else "")
     )
 
     print("Posting to Slack...")
