@@ -80,10 +80,13 @@ class Looker:
         data = r.json()
         return data if isinstance(data, list) else [data]
 
+    def _date_filter(self, start, end):
+        return str(start) if start == end else f"{start} to {end}"
+
     def totals(self, start, end):
         rows = self.query(
             fields=["orders.cz_actual", "orders.num_orders", "order_items.number_of_items"],
-            filters={**RETAIL_FILTERS, "orders.created_date": f"{start} to {end}"},
+            filters={**RETAIL_FILTERS, "orders.created_date": self._date_filter(start, end)},
         )
         row = rows[0] if rows else {}
         return dict(
@@ -95,7 +98,7 @@ class Looker:
     def stores(self, start, end):
         rows = self.query(
             fields=["orders.store_name", "orders.cz_actual", "orders.num_orders"],
-            filters={**RETAIL_FILTERS, "orders.created_date": f"{start} to {end}"},
+            filters={**RETAIL_FILTERS, "orders.created_date": self._date_filter(start, end)},
             sorts=["orders.cz_actual desc"],
         )
         result = {"soho": 0.0, "denver": 0.0, "dallas": 0.0}
@@ -108,7 +111,7 @@ class Looker:
     def daily(self, start, end):
         rows = self.query(
             fields=["orders.created_date", "orders.cz_actual"],
-            filters={**RETAIL_FILTERS, "orders.created_date": f"{start} to {end}"},
+            filters={**RETAIL_FILTERS, "orders.created_date": self._date_filter(start, end)},
             sorts=["orders.created_date"],
         )
         return {
@@ -122,9 +125,9 @@ class Looker:
             rows = self.query(
                 fields=["orders.created_month", "orders.cz_actual", "orders.num_orders",
                         "order_items.number_of_items"],
-                filters={**RETAIL_FILTERS, "orders.created_date": f"{start} to {end}"},
+                filters={**RETAIL_FILTERS, "orders.created_date": self._date_filter(start, end)},
                 sorts=["orders.created_month desc"],
-                limit=36,
+                limit=48,
             )
             return rows
         except Exception as e:
@@ -134,13 +137,13 @@ class Looker:
     def categories(self, start, end):
         try:
             rows = self.query(
-                fields=["order_items.product_type", "orders.cz_actual",
+                fields=["products.product_type", "orders.cz_actual",
                         "order_items.number_of_items"],
-                filters={**RETAIL_FILTERS, "orders.created_date": f"{start} to {end}"},
+                filters={**RETAIL_FILTERS, "orders.created_date": self._date_filter(start, end)},
                 sorts=["orders.cz_actual desc"],
                 limit=20,
             )
-            if rows and not rows[0].get("order_items.product_type"):
+            if rows and not rows[0].get("products.product_type"):
                 return []
             return rows
         except Exception as e:
@@ -187,7 +190,7 @@ def fmtd(v):     return f"${v:,.0f}" if v else "$0"
 def arrow(v):    return "▲" if v is not None and v >= 0 else "▼"
 def pct_s(v):    return f"{abs(v):.0f}%" if v is not None else "n/a"
 def sign(v):     return f"{arrow(v)} {pct_s(v)}" if v is not None else "–"
-def fmt_pct(v):  return ("+" if v is not None and v >= 0 else "") + pct_s(v) if v is not None else "–"
+def fmt_pct(v):  return (("+" if v >= 0 else "−") + pct_s(v)) if v is not None else "–"
 def css_cls(v):  return "pos" if v is not None and v >= 0 else "neg"
 
 def aov_fn(r):   return round(r["revenue"] / r["orders"], 0) if r["orders"] else 0
@@ -205,6 +208,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 .header-sub { font-size: 12px; color: #9A9088; margin-top: 3px; }
 .header-right { text-align: right; font-size: 12px; color: #9A9088; line-height: 1.7; }
 .content { padding: 20px 28px; max-width: 1060px; }
+.perf-summary { background: white; border: 1px solid #E4DFDA; border-radius: 6px;
+                padding: 16px 20px; font-size: 13px; line-height: 1.7; color: #3A3630; }
+.perf-summary p { margin-bottom: 10px; }
+.perf-summary p:last-child { margin-bottom: 0; }
 .section-label { font-size: 10px; font-weight: 700; text-transform: uppercase;
   letter-spacing: 1.2px; color: #8A8278; margin: 22px 0 10px;
   border-bottom: 1px solid #E4DFDA; padding-bottom: 6px; }
@@ -273,8 +280,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 
 def make_html(d, ty_yd, ty_lw, ty_mtd, ly_yd, ly_lw, ly_mtd,
               stores_yd, stores_lw, stores_mtd,
-              stores_ly_lw, stores_ly_mtd,
-              plan, daily_actuals, categories, monthly_trend):
+              stores_ly_yd, stores_ly_lw, stores_ly_mtd,
+              plan, daily_actuals, categories, monthly_trend,
+              ly_categories=None):
 
     def sp(s, e, k="total"):
         return sum(plan.get(day, {}).get(k, 0) for day in range(s, e + 1))
@@ -283,6 +291,100 @@ def make_html(d, ty_yd, ty_lw, ty_mtd, ly_yd, ly_lw, ly_mtd,
     yd_plan = plan.get(yd_day, {}).get("total", 0)
     lw_plan = sp(d["lw_start"].day, d["lw_end"].day)
     mtd_plan = sp(1, yd_day)
+
+    # ── ly_rev_map for category vs LY ────────────────────────────────────────
+    ly_rev_map = {}
+    if ly_categories:
+        for r in ly_categories:
+            cat = r.get("products.product_type") or ""
+            if cat:
+                ly_rev_map[cat] = float(r.get("orders.cz_actual", 0) or 0)
+
+    # ── Performance summary paragraphs ───────────────────────────────────────
+    mtd_vly_v = pct(ty_mtd["revenue"], ly_mtd["revenue"])
+    mtd_vp_v  = pct(ty_mtd["revenue"], mtd_plan)
+    lw_vly_v  = pct(ty_lw["revenue"],  ly_lw["revenue"])
+    lw_vp_v   = pct(ty_lw["revenue"],  lw_plan)
+    yd_vp_v   = pct(ty_yd["revenue"],  yd_plan)
+    yd_vly_v  = pct(ty_yd["revenue"],  ly_yd["revenue"])
+
+    def _s(v): return (f"+{abs(v):.0f}%" if v >= 0 else f"−{abs(v):.0f}%") if v is not None else "n/a"
+
+    # Para 1: MTD + last week + yesterday
+    p1 = (f"MTD retail revenue of {fmtd(ty_mtd['revenue'])} is tracking "
+          f"{_s(mtd_vp_v)} vs plan and {sign(mtd_vly_v)} vs last year "
+          f"through {d['yd'].strftime('%B %-d')}.")
+    if ty_lw["revenue"] > 0:
+        lw_note = "ahead of plan" if (lw_vp_v or 0) >= 0 else f"{_s(lw_vp_v)} vs plan"
+        p1 += (f" Last week ({d['lw_start'].strftime('%b %-d')}–{d['lw_end'].strftime('%-d')}) "
+               f"came in at {fmtd(ty_lw['revenue'])}, {lw_note} and {sign(lw_vly_v)} vs LY "
+               f"({ty_lw['orders']} orders, AOV {fmtd(aov_fn(ty_lw))}).")
+    if ty_yd["revenue"] == 0 and yd_plan > 0:
+        p1 += (f" No orders were recorded {d['yd'].strftime('%A, %B %-d')}, "
+               f"driving the full gap against a {fmtd(yd_plan)} daily plan.")
+    elif ty_yd["revenue"] > 0:
+        p1 += (f" Yesterday ({d['yd'].strftime('%a %b %-d')}): "
+               f"{fmtd(ty_yd['revenue'])} — {sign(yd_vly_v)} vs LY, {_s(yd_vp_v)} vs plan, "
+               f"{ty_yd['orders']} order{'s' if ty_yd['orders'] != 1 else ''}.")
+
+    # Para 2: Store breakdown with insights
+    def _store_line(key):
+        rev  = stores_mtd.get(key, 0)
+        ly_r = stores_ly_mtd.get(key, 0)
+        vly  = pct(rev, ly_r)
+        vp_s = pct(rev, sp(1, yd_day, key))
+        bits = [fmtd(rev)]
+        if vp_s is not None: bits.append(f"{_s(vp_s)} vs plan")
+        if vly  is not None: bits.append(f"{sign(vly)} vs LY")
+        return f"({', '.join(bits)})"
+
+    soho_vp   = pct(stores_mtd.get("soho",   0), sp(1, yd_day, "soho"))
+    denver_vp = pct(stores_mtd.get("denver", 0), sp(1, yd_day, "denver"))
+    dallas_vp = pct(stores_mtd.get("dallas", 0), sp(1, yd_day, "dallas"))
+
+    p2 = (f"SoHo leads MTD at {fmtd(stores_mtd.get('soho', 0))} {_store_line('soho')}. "
+          f"Denver at {fmtd(stores_mtd.get('denver', 0))} {_store_line('denver')}")
+    if denver_vp is not None and denver_vp > 0:
+        p2 += " — the strongest relative performer vs plan this month"
+    p2 += f". Dallas at {fmtd(stores_mtd.get('dallas', 0))} {_store_line('dallas')}"
+    if dallas_vp is not None and dallas_vp < -40:
+        p2 += ", continues to ramp as a newer location"
+    p2 += "."
+
+    # Para 3: Category highlights with vs LY
+    p3 = ""
+    if categories and ty_mtd["revenue"] > 0:
+        total_cat = sum(float(r.get("orders.cz_actual", 0) or 0) for r in categories)
+        insights = []
+        for r in categories:
+            cat  = r.get("products.product_type", "") or ""
+            if not cat: continue
+            crev = float(r.get("orders.cz_actual", 0) or 0)
+            mix  = round(crev / total_cat * 100) if total_cat else 0
+            vly  = pct(crev, ly_rev_map[cat]) if cat in ly_rev_map else None
+            insights.append((cat, crev, mix, vly))
+
+        top3_parts = []
+        for cat, crev, mix, vly in insights[:3]:
+            part = f"{cat} {fmtd(crev)} ({mix}%"
+            if vly is not None: part += f", {sign(vly)} vs LY"
+            part += ")"
+            top3_parts.append(part)
+        p3 = "Top categories MTD: " + ", ".join(top3_parts) + "."
+
+        gaps = [(c, v) for c, _, m, v in insights if v is not None and v < -40 and m >= 3]
+        if gaps:
+            gap_str = ", ".join(f"{c} ({sign(v)} vs LY)" for c, v in gaps[:3])
+            p3 += f" Notable gaps vs LY: {gap_str}."
+
+    summary_html = (
+        '<div class="section-label">Performance Summary</div>'
+        '<div class="perf-summary">'
+        f'<p>{p1}</p>'
+        f'<p>{p2}</p>'
+        + (f'<p>{p3}</p>' if p3 else '')
+        + '</div>'
+    )
 
     def kpi_card(period_label, r, ly_r, plan_total, plan_label):
         rev_vly = pct(r["revenue"], ly_r["revenue"])
@@ -339,13 +441,14 @@ def make_html(d, ty_yd, ty_lw, ty_mtd, ly_yd, ly_lw, ly_mtd,
     # Store table
     def store_tbl_row(key, label, tag=""):
         tag_html = f'<span class="store-tag">{tag}</span>' if tag else ""
-        yd_vly  = pct(stores_yd.get(key, 0),  stores_yd.get(key, 0))   # placeholder — no LY by store for YD
+        yd_vly  = pct(stores_yd.get(key, 0),  stores_ly_yd.get(key, 0))
         lw_vly  = pct(stores_lw.get(key, 0),  stores_ly_lw.get(key, 0))
         mtd_vly = pct(stores_mtd.get(key, 0), stores_ly_mtd.get(key, 0))
         mtd_plan_store = sp(1, yd_day, key)
         mtd_vp  = pct(stores_mtd.get(key, 0), mtd_plan_store)
         return (f'<tr><td><span class="store-name">{label}</span>{tag_html}</td>'
-                f'<td>{fmtd(stores_yd.get(key,0))}</td><td>—</td>'
+                f'<td>{fmtd(stores_yd.get(key,0))}</td>'
+                f'<td><span class="{css_cls(yd_vly)}">{sign(yd_vly)}</span></td>'
                 f'<td class="col-divider">{fmtd(stores_lw.get(key,0))}</td>'
                 f'<td><span class="{css_cls(lw_vly)}">{sign(lw_vly)}</span></td>'
                 f'<td class="col-divider">{fmtd(stores_mtd.get(key,0))}</td>'
@@ -390,7 +493,7 @@ def make_html(d, ty_yd, ty_lw, ty_mtd, ly_yd, ly_lw, ly_mtd,
     labels_js  = ", ".join(f"'{d_num}'" for d_num in days_list)
     max_val    = max([daily_actuals.get(n, 0) for n in days_list] +
                      [plan.get(n, {}).get("total", 0) for n in days_list] + [1])
-    chart_max  = int(max_val * 1.2 / 1000 + 1) * 1000
+    chart_max  = max(8000, (int(max_val / 2000) + 1) * 2000)
 
     # Category table
     cat_html = ""
@@ -398,21 +501,25 @@ def make_html(d, ty_yd, ty_lw, ty_mtd, ly_yd, ly_lw, ly_mtd,
         total_cat_rev = sum(float(r.get("orders.cz_actual", 0) or 0) for r in categories)
         rows_html = ""
         for r in categories:
-            cat   = r.get("order_items.product_type", "Other") or "Other"
+            cat   = r.get("products.product_type", "Other") or "Other"
             rev   = float(r.get("orders.cz_actual", 0) or 0)
             units = int(r.get("order_items.number_of_items", 0) or 0)
             mix   = round(rev / total_cat_rev * 100) if total_cat_rev else 0
             bar_w = max(1, round(mix * 2.5))
+            cat_vly = pct(rev, ly_rev_map[cat]) if cat in ly_rev_map else None
+            vly_cell = (f'<span class="{css_cls(cat_vly)}">{sign(cat_vly)}</span>'
+                        if cat_vly is not None else '<span class="neutral">n/a</span>')
             rows_html += (f'<tr><td>{cat}</td><td>{fmtd(rev)}</td>'
                           f'<td style="text-align:left;padding-left:8px;">'
                           f'<span class="mix-bar" style="width:{bar_w}px;"></span>{mix}%</td>'
-                          f'<td>{units}</td></tr>')
+                          f'<td>{units}</td><td>{vly_cell}</td></tr>')
         cat_html = f"""
   <div class="section-label">Category Mix &mdash; MTD {d['mtd_start'].strftime('%b %-d')}–{d['yd'].strftime('%-d')}</div>
   <table class="cat-tbl">
     <thead>
       <tr><th>Category</th><th>Revenue</th>
-      <th style="text-align:left;padding-left:8px;">Mix</th><th>Units</th></tr>
+      <th style="text-align:left;padding-left:8px;">Mix</th>
+      <th>Units</th><th>vs LY Rev</th></tr>
     </thead>
     <tbody>{rows_html}</tbody>
   </table>"""
@@ -431,7 +538,7 @@ def make_html(d, ty_yd, ty_lw, ty_mtd, ly_yd, ly_lw, ly_mtd,
             )
         rows_html = ""
         cur = d["yd"].replace(day=1)
-        for _ in range(20):
+        for _ in range(18):
             mo_key  = cur.strftime("%Y-%m")
             ly_key  = (cur.replace(year=cur.year - 1)).strftime("%Y-%m")
             data    = month_map.get(mo_key)
@@ -490,6 +597,8 @@ def make_html(d, ty_yd, ty_lw, ty_mtd, ly_yd, ly_lw, ly_mtd,
 
 <div class="content">
 
+  {summary_html}
+
   <div class="section-label">Performance Overview</div>
   <div class="period-grid">
     {kpi_card(f"Yesterday &mdash; {yd_label}", ty_yd, ly_yd, yd_plan, d['yd'].strftime('%b %-d'))}
@@ -506,7 +615,7 @@ def make_html(d, ty_yd, ty_lw, ty_mtd, ly_yd, ly_lw, ly_mtd,
       <span><span class="dot" style="background:#5B4E3C;"></span>Actual Revenue</span>
       <span><span class="dot" style="background:#D4C5B0;"></span>Daily Plan</span>
     </div>
-    <canvas id="dailyChart" height="180"></canvas>
+    <canvas id="dailyChart" style="width:100%;height:auto;display:block;"></canvas>
   </div>
 
   {cat_html}
@@ -529,19 +638,20 @@ def make_html(d, ty_yd, ty_lw, ty_mtd, ly_yd, ly_lw, ly_mtd,
   var days    = [{labels_js}];
   var actuals = [{actuals_js}];
   var plans   = [{plans_js}];
-  var W = canvas.parentElement.clientWidth - 32;
-  canvas.width = W; canvas.height = 200;
+  var W = 900, H = 200;
+  canvas.width = W; canvas.height = H;
   var padL=56, padR=12, padT=8, padB=28;
-  var cW=W-padL-padR, cH=canvas.height-padT-padB;
+  var cW=W-padL-padR, cH=H-padT-padB;
   var MAX={chart_max}, n=days.length;
-  var groupW=cW/n, bW=Math.max(groupW*0.3,5);
-  [0, Math.round(MAX/4), Math.round(MAX/2), Math.round(MAX*3/4), MAX].forEach(function(v) {{
+  var groupW=cW/n, bW=Math.max(groupW*0.3, 5);
+  var step=MAX/4;
+  [0, step, step*2, step*3, MAX].forEach(function(v) {{
     var y=padT+cH-(v/MAX)*cH;
     ctx.save(); ctx.strokeStyle='#EDE8E2'; ctx.lineWidth=1; ctx.setLineDash([3,3]);
     ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(padL+cW,y); ctx.stroke(); ctx.restore();
     ctx.fillStyle='#9A9088'; ctx.font='10px -apple-system,sans-serif';
     ctx.textAlign='right';
-    ctx.fillText('$'+(v>=1000?(v/1000)+'K':v), padL-5, y+3.5);
+    ctx.fillText(v===0?'$0':'$'+(v/1000)+'K', padL-5, y+3.5);
   }});
   days.forEach(function(d,i) {{
     var gx=padL+i*groupW, cx=gx+groupW/2;
@@ -551,8 +661,10 @@ def make_html(d, ty_yd, ty_lw, ty_mtd, ly_yd, ly_lw, ly_mtd,
     ctx.fillStyle=actuals[i]>0?'#5B4E3C':'#F0EDE8';
     ctx.fillRect(cx,padT+cH-aH,bW,Math.max(aH,1));
     ctx.fillStyle='#9A9088'; ctx.font='9px -apple-system,sans-serif';
-    ctx.textAlign='center'; ctx.fillText(d,cx,canvas.height-8);
+    ctx.textAlign='center'; ctx.fillText(d,cx,H-8);
   }});
+  ctx.strokeStyle='#E4DFDA'; ctx.lineWidth=1; ctx.setLineDash([]);
+  ctx.beginPath(); ctx.moveTo(padL,padT+cH); ctx.lineTo(padL+cW,padT+cH); ctx.stroke();
 }})();
 </script>
 </body>
@@ -603,8 +715,9 @@ def main():
     ty_mtd = lk.totals(d["mtd_start"],   d["yd"])
     ly_mtd = lk.totals(d["ly_mtd_start"],d["ly_yd"])
 
-    print("Querying store breakdown (5 queries)...")
+    print("Querying store breakdown (6 queries)...")
     stores_yd      = lk.stores(d["yd"],          d["yd"])
+    stores_ly_yd   = lk.stores(d["ly_yd"],       d["ly_yd"])
     stores_lw      = lk.stores(d["lw_start"],    d["lw_end"])
     stores_mtd     = lk.stores(d["mtd_start"],   d["yd"])
     stores_ly_lw   = lk.stores(d["ly_lw_start"], d["ly_lw_end"])
@@ -613,11 +726,12 @@ def main():
     print("Querying daily actuals...")
     daily_actuals = lk.daily(d["mtd_start"], d["yd"])
 
-    print("Querying category mix...")
-    categories = lk.categories(d["mtd_start"], d["yd"])
+    print("Querying category mix (TY + LY)...")
+    categories    = lk.categories(d["mtd_start"],    d["yd"])
+    ly_categories = lk.categories(d["ly_mtd_start"], d["ly_yd"])
 
     print("Querying monthly trend...")
-    trend_start = (d["yd"].replace(day=1) - datetime.timedelta(days=365 + 60)).replace(day=1)
+    trend_start = (d["yd"].replace(day=1) - datetime.timedelta(days=30 * 30)).replace(day=1)
     monthly_trend = lk.monthly_trend(trend_start, d["yd"])
 
     # ── Metrics ───────────────────────────────────────────────────────────────
@@ -652,8 +766,8 @@ def main():
     print("Generating HTML report...")
     html = make_html(
         d, ty_yd, ty_lw, ty_mtd, ly_yd, ly_lw, ly_mtd,
-        stores_yd, stores_lw, stores_mtd, stores_ly_lw, stores_ly_mtd,
-        plan, daily_actuals, categories, monthly_trend,
+        stores_yd, stores_lw, stores_mtd, stores_ly_yd, stores_ly_lw, stores_ly_mtd,
+        plan, daily_actuals, categories, monthly_trend, ly_categories,
     )
     report_url = push_report_page(html, d)
 
