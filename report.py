@@ -69,14 +69,15 @@ class Looker:
                   "Content-Type": "application/json"}
 
     def query(self, fields, filters, sorts=None, limit=500):
-        body = {"model": "citizenry", "explore_name": "orders",
+        body = {"model": "citizenry", "view": "orders",
                 "fields": fields, "filters": filters,
                 "sorts": sorts or [], "limit": str(limit)}
         r = requests.post(f"{LOOKER_URL}/api/4.0/queries/run/json",
                           headers=self.h, json=body)
+        if not r.ok:
+            print(f"Looker error {r.status_code}: {r.text[:500]}", file=sys.stderr)
         r.raise_for_status()
         data = r.json()
-        # Looker returns a list; single-row totals queries return a list of 1
         return data if isinstance(data, list) else [data]
 
     def totals(self, start, end):
