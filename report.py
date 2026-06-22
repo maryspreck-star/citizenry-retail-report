@@ -404,12 +404,32 @@ def make_html(d, ty_yd, ty_lw, ty_mtd, ly_yd, ly_lw, ly_mtd,
             gap_str = ", ".join(f"{c} ({sign(v)} vs LY)" for c, v in gaps[:3])
             p3 += f" Notable gaps vs LY: {gap_str}."
 
+    # Para 4: Audience (Trade vs B2C)
+    p4 = ""
+    if aud_mtd:
+        trade_rev = aud_mtd.get("Trade", {}).get("revenue", 0)
+        b2c_rev   = aud_mtd.get("B2C",   {}).get("revenue", 0)
+        total_aud = trade_rev + b2c_rev
+        if total_aud > 0:
+            trade_pct = round(trade_rev / total_aud * 100)
+            p4 = (f"Trade accounted for {trade_pct}% of MTD revenue ({fmtd(trade_rev)}), "
+                  f"with B2C at {100 - trade_pct}% ({fmtd(b2c_rev)}).")
+            if aud_lw:
+                lw_trade = aud_lw.get("Trade", {}).get("revenue", 0)
+                lw_b2c   = aud_lw.get("B2C",   {}).get("revenue", 0)
+                lw_tot   = lw_trade + lw_b2c
+                if lw_tot > 0:
+                    lw_trade_pct = round(lw_trade / lw_tot * 100)
+                    p4 += (f" Last week Trade was {lw_trade_pct}% of weekly revenue "
+                           f"({fmtd(lw_trade)}).")
+
     summary_html = (
         '<div class="section-label">Performance Summary</div>'
         '<div class="perf-summary">'
         f'<p>{p1}</p>'
         f'<p>{p2}</p>'
         + (f'<p>{p3}</p>' if p3 else '')
+        + (f'<p>{p4}</p>' if p4 else '')
         + '</div>'
     )
 
