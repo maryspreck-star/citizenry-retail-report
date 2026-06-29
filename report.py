@@ -45,14 +45,15 @@ STORE_LABELS = {"soho": "SoHo", "denver": "Denver", "dallas": "Dallas"}
 def compute_dates():
     today     = datetime.date.today()
     yd        = today - datetime.timedelta(days=1)
+    yd_minus1 = yd - datetime.timedelta(days=1)
     lw_end    = yd
     lw_start  = lw_end - datetime.timedelta(days=6)
     mtd_start = yd.replace(day=1)
     def ly(dt): return dt.replace(year=dt.year - 1)
     return dict(
-        today=today, yd=yd,
+        today=today, yd=yd, yd_minus1=yd_minus1,
         lw_start=lw_start, lw_end=lw_end, mtd_start=mtd_start,
-        ly_yd=ly(yd),
+        ly_yd=ly(yd), ly_yd_minus1=ly(yd_minus1),
         ly_lw_start=ly(lw_start), ly_lw_end=ly(lw_end),
         ly_mtd_start=ly(mtd_start),
         week_label=f"Week of {lw_start.strftime('%b %-d')}–{lw_end.strftime('%-d, %Y')}",
@@ -807,23 +808,27 @@ def main():
     ly_yd  = lk.totals(d["ly_yd"],       d["ly_yd"])
     ty_lw  = lk.totals(d["lw_start"],    d["lw_end"])
     ly_lw  = lk.totals(d["ly_lw_start"], d["ly_lw_end"])
-    ty_mtd = lk.totals(d["mtd_start"],   d["yd"])
-    ly_mtd = lk.totals(d["ly_mtd_start"],d["ly_yd"])
+    # MTD range ends at yd_minus1 to avoid Looker data lag on the most recent day;
+    # yesterday's single-day results are added below after all queries complete.
+    ty_mtd = lk.totals(d["mtd_start"],   d["yd_minus1"])
+    ly_mtd = lk.totals(d["ly_mtd_start"],d["ly_yd_minus1"])
 
     print("Querying store breakdown (6 queries)...")
     stores_yd      = lk.stores(d["yd"],          d["yd"])
     stores_ly_yd   = lk.stores(d["ly_yd"],       d["ly_yd"])
     stores_lw      = lk.stores(d["lw_start"],    d["lw_end"])
-    stores_mtd     = lk.stores(d["mtd_start"],   d["yd"])
+    stores_mtd     = lk.stores(d["mtd_start"],   d["yd_minus1"])
     stores_ly_lw   = lk.stores(d["ly_lw_start"], d["ly_lw_end"])
-    stores_ly_mtd  = lk.stores(d["ly_mtd_start"],d["ly_yd"])
+    stores_ly_mtd  = lk.stores(d["ly_mtd_start"],d["ly_yd_minus1"])
 
     print("Querying daily actuals...")
-    daily_actuals = lk.daily(d["mtd_start"], d["yd"])
+    daily_actuals = lk.daily(d["mtd_start"], d["yd_minus1"])
+    # pin yesterday explicitly so the chart always includes the most recent day
+    daily_actuals[d["yd"].day] = ty_yd["revenue"]
 
     print("Querying category mix (TY + LY)...")
-    categories    = lk.categories(d["mtd_start"],    d["yd"])
-    ly_categories = lk.categories(d["ly_mtd_start"], d["ly_yd"])
+    categories    = lk.categories(d["mtd_start"],    d["yd_minus1"])
+    ly_categories = lk.categories(d["ly_mtd_start"], d["ly_yd_minus1"])
 
     print("Querying monthly trend...")
     trend_start = (d["yd"].replace(day=1) - datetime.timedelta(days=30 * 30)).replace(day=1)
@@ -832,8 +837,23 @@ def main():
     print("Querying audience (Trade vs B2C)...")
     aud_yd          = lk.audience(d["yd"],          d["yd"])
     aud_lw          = lk.audience(d["lw_start"],    d["lw_end"])
-    aud_mtd         = lk.audience(d["mtd_start"],   d["yd"])
-    aud_mtd_stores  = lk.audience_stores(d["mtd_start"], d["yd"])
+    aud_mtd         = lk.audience(d["mtd_start"],   d["yd_minus1"])
+    aud_mtd_stores  = lk.audience_stores(d["mtd_start"], d["yd_minus1"])
+
+    # Merge yesterday into all MTD accumulators so totals are lag-free
+    for key in ("revenue", "orders", "units"):
+        ty_mtd[key] += ty_yd[key]
+        ly_mtd[key] += ly_yd[key]
+    for store in ("soho", "denver", "dallas"):
+        stores_mtd[store]   += stores_yd.get(store, 0)
+        stores_ly_mtd[store] += stores_ly_yd.get(store, 0)
+    for grp in ("B2C", "Trade"):
+        aud_mtd[grp]["revenue"] += aud_yd[grp]["revenue"]
+        aud_mtd[grp]["orders"]  += aud_yd[grp]["orders"]
+    aud_yd_stores = lk.audience_stores(d["yd"], d["yd"])
+    for store in ("soho", "denver", "dallas"):
+        for grp in ("B2C", "Trade"):
+            aud_mtd_stores[store][grp] += aud_yd_stores.get(store, {}).get(grp, 0)
 
     # ── Metrics ───────────────────────────────────────────────────────────────
 
