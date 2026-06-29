@@ -791,6 +791,46 @@ def push_report_page(html, d):
     print(f"  ⚠  Page publish failed: {r2.status_code} {r2.text[:300]}")
     return None
 
+# ── Slack deduplication ───────────────────────────────────────────────────────
+
+_POSTED_FLAG = "last_slack_post.txt"
+
+def _gh_headers():
+    return {"Authorization": f"token {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github+json"}
+
+def check_already_posted(date_str):
+    if not GITHUB_TOKEN:
+        return False
+    r = requests.get(
+        f"https://api.github.com/repos/{GITHUB_REPO}/contents/{_POSTED_FLAG}",
+        headers=_gh_headers())
+    if not r.ok:
+        return False
+    try:
+        return base64.b64decode(r.json()["content"]).decode().strip() == date_str
+    except Exception:
+        return False
+
+def mark_as_posted(date_str):
+    if not GITHUB_TOKEN:
+        return
+    headers = _gh_headers()
+    encoded = base64.b64encode(date_str.encode()).decode()
+    body = {"message": f"Mark Slack post {date_str}", "content": encoded}
+    r = requests.get(
+        f"https://api.github.com/repos/{GITHUB_REPO}/contents/{_POSTED_FLAG}",
+        headers=headers)
+    if r.ok:
+        body["sha"] = r.json()["sha"]
+    r2 = requests.put(
+        f"https://api.github.com/repos/{GITHUB_REPO}/contents/{_POSTED_FLAG}",
+        headers=headers, json=body)
+    if r2.ok:
+        print(f"✅  Marked as posted ({date_str})")
+    else:
+        print(f"  ⚠  Could not update flag: {r2.status_code} {r2.text[:100]}")
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -895,6 +935,11 @@ def main():
 
     # ── Slack ─────────────────────────────────────────────────────────────────
 
+    today_str = str(d["today"])
+    if check_already_posted(today_str):
+        print(f"ℹ️  Slack post already sent today ({today_str}) — skipping duplicate")
+        return
+
     lw_label  = f"{d['lw_start'].strftime('%b %-d')}–{d['lw_end'].strftime('%-d')}"
     link_line = f"\n<{report_url}|View full report →>" if report_url else ""
 
@@ -925,6 +970,7 @@ def main():
     resp = requests.post(SLACK_WEBHOOK, json={"text": text, "mrkdwn": True})
     if resp.status_code == 200 and resp.text == "ok":
         print("✅  Posted to Slack")
+        mark_as_posted(today_str)
     else:
         print(f"❌  Slack error: {resp.status_code} {resp.text}", file=sys.stderr)
         sys.exit(1)
